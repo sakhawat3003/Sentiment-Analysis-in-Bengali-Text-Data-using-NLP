@@ -1,0 +1,244 @@
+library(reticulate)
+library(tidyverse)
+library(keras)
+library(tensorflow)
+
+comments.data01<-read_csv(file = "Bangla Comments.csv", locale = locale(encoding = "UTF-8"))
+
+
+
+View(comments.data01)
+comments.data01<-comments.data01[,c("FinalTag","Comments")]
+
+#removing punctuation marks from the comments
+comments.data01$Comments<-gsub('[[:punct:] ]+',' ', comments.data01$Comments)
+
+#removing the full stop
+comments.data01$Comments<-gsub('।',' ', comments.data01$Comments)
+
+#optional. Filtering happiness and sadness comments
+comments.data01<-comments.data01[comments.data01$FinalTag %in% c("Happiness","Sadness"),]
+dim(comments.data01)
+table(comments.data01$FinalTag)
+index<-sample(1:length(comments.data01$FinalTag))
+comments.data01<-comments.data01[index,]
+
+Labels<-comments.data01$FinalTag
+Labels01<-ifelse(Labels=="Happiness",1,0)
+Labels[1:10]
+Labels01[1:10]
+
+
+
+#preparing the data
+Labels<-comments.data01$FinalTag
+
+Labels01<-case_when(Labels=="Anger" ~ 0,
+                    Labels=="Disgust" ~ 1,
+                    Labels=="Fear" ~ 2,
+                    Labels=="Happiness" ~ 3,
+                    Labels=="Sadness" ~ 4,
+                    Labels=="Sarcasm" ~ 5,
+                    Labels=="Surprise" ~ 6,
+                    TRUE ~ 7)
+
+Labels01.encoded<-to_categorical(Labels01)
+
+reticulate::py_install('transformers', pip = TRUE)
+transformer = reticulate::import('transformers')
+tf = reticulate::import('tensorflow')
+builtins <- import_builtins() #built in python methods
+
+GPUs <- tf$config$list_physical_devices(device_type='GPU')
+GPUs
+
+bangla.tokenizer <- transformer$AutoTokenizer$from_pretrained('sagorsarker/bangla-bert-base')
+bangla.tokenizer$vocab[1000:1010]
+text = "আমি বাংলায় গান গাই।"
+bangla.tokenizer(text)
+
+text2<-comments.data01$Comments[2]
+text2
+bangla.tokenizer$encode(comments.data01$Comments[2])
+
+example.tokenize<-bangla.tokenizer$encode(text2)
+example.tokenize
+bangla.tokenizer$convert_ids_to_tokens(example.tokenize)
+bangla.tokenizer$decode(example.tokenize)
+
+bangla.comments.encodings=bangla.tokenizer(comments.data01$Comments,truncation=TRUE,
+                                 padding=TRUE,max_length=250L)
+class(bangla.comments.encodings)
+
+
+bangla.BERT = transformer$TFBertModel$from_pretrained("sagorsarker/bangla-bert-base")
+n=length(comments.data01$Comments)
+n
+features_train = matrix(NA, nrow=n, ncol=768)
+dim(features_train)
+
+
+for (i in 1:n){
+  encodings_i = bangla.tokenizer(comments.data01$Comments[i], 
+                                 truncation=TRUE, padding=TRUE,max_length=250L, return_tensors='tf')
+  features_train[i,] = py_to_r(array_reshape(bangla.BERT(encodings_i)[[1]][[0]][[0]],c(1, 768)))
+}
+
+
+dim(features_train)
+saveRDS(object = features_train, file = "feature trained multilingual.rds")
+
+#optional. Loading trained featured data
+features_train<-readRDS(file = file.choose())
+dim(features_train)
+
+
+#optional. Keras modeling for binary classification
+model <- keras_model_sequential() %>% 
+  # Specify the input shape
+  layer_dense(units = 100, activation = "relu", input_shape = ncol(features_train)) %>% 
+  # add a dense layer with 40 units
+  layer_dense(units = 40, activation = "relu", kernel_initializer = "he_normal", 
+              bias_initializer = "zeros", kernel_regularizer = regularizer_l2(0.05)) %>% 
+  layer_dropout(rate = 0.2) %>%
+  # add the classifier on top
+  layer_dense(units = 2, activation = "softmax")
+
+model %>% compile(
+  optimizer="rmsprop",
+  loss="binary_crossentropy",
+  metrics= c("accuracy")
+)
+
+history <- model %>% fit(
+  features_train, Labels01.encoded,
+  epochs = 20,
+  batch_size = 32,
+  validation_split=0.3)
+
+
+#keras modeling for 8 classes
+model <- keras_model_sequential() %>% 
+  # Specify the input shape
+  layer_dense(units = 100, activation = "relu", input_shape = ncol(features_train)) %>% 
+  # add a dense layer with 40 units
+  layer_dense(units = 40, activation = "relu", kernel_initializer = "he_normal", 
+              bias_initializer = "zeros", kernel_regularizer = regularizer_l2(0.05)) %>% 
+  layer_dropout(rate = 0.2) %>%
+  # add the classifier on top
+  layer_dense(units = 8, activation = "softmax") 
+
+
+model %>% compile(
+  optimizer = "rmsprop", #needs to be described 
+  loss = "categorical_crossentropy", #needs to be described
+  metrics = c("accuracy")
+)
+
+
+history <- model %>% fit(
+  features_train, Labels01.encoded,
+  epochs = 20,
+  batch_size = 32,
+  validation_split=0.3) #this will show the results
+
+
+
+#keras model for happiness and sadness
+model <- keras_model_sequential() %>% 
+  # Specify the input shape
+  layer_dense(units = 64, activation = "relu", input_shape = ncol(features_train)) %>% 
+  # add a dense layer with 40 units
+  layer_dense(units = 32, activation = "relu") %>%
+  # add the classifier on top
+  layer_dense(units = 2, activation = "sigmoid") 
+
+
+model %>% compile(
+  optimizer="rmsprop",
+  loss="binary_crossentropy",
+  metrics= c("accuracy")
+)
+
+
+history <- model %>% fit(
+  features_train, Labels01.encoded,
+  epochs = 20,
+  batch_size = 32,
+  validation_split=0.3)
+
+
+
+#fitting the model and testing
+
+history <- model %>% fit(partial_x_train,
+                         partial_y_train,
+                         epochs = 9,
+                         batch_size = 512,
+                         validation_data = list(x_val, y_val))
+
+results <- model %>% evaluate(x_test, one_hot_test_labels)
+
+
+
+#multilingual bert base
+multilingual.tokenizer <- transformer$AutoTokenizer$from_pretrained('bert-base-multilingual-uncased')
+multilingual.BERT = transformer$TFBertModel$from_pretrained("bert-base-multilingual-uncased")
+
+multilingual.tokenizer$vocab[1000:1005]
+
+text = "আমি বাংলায় গান গাই।"
+multilingual.tokenizer(text)
+
+text2<-comments.data01$Comments[2]
+text2
+
+example.tokenize<-multilingual.tokenizer$encode(text2)
+example.tokenize
+multilingual.tokenizer$decode(example.tokenize)
+
+
+
+n=length(comments.data01$Comments)
+n
+features_train = matrix(NA, nrow=n, ncol=768)
+dim(features_train)
+
+for (i in 1:n){
+  encodings_i = multilingual.tokenizer(comments.data01$Comments[i], 
+                                       truncation=TRUE, padding=TRUE,max_length=250L, return_tensors='tf')
+  features_train[i,] = py_to_r(array_reshape(multilingual.BERT(encodings_i)[[1]][[0]][[0]],c(1, 768)))
+}
+
+
+dim(features_train)
+saveRDS(object = features_train, file = "feature trained multilingual.rds")
+
+model <- keras_model_sequential() %>% 
+  # Specify the input shape
+  layer_dense(units = 100, activation = "relu", input_shape = ncol(features_train)) %>% 
+  # add a dense layer with 40 units
+  layer_dense(units = 40, activation = "relu", kernel_initializer = "he_normal", 
+              bias_initializer = "zeros", kernel_regularizer = regularizer_l2(0.05)) %>% 
+  layer_dropout(rate = 0.2) %>%
+  # add the classifier on top
+  layer_dense(units = 6, activation = "softmax")
+
+model %>% compile(
+  optimizer = "rmsprop",
+  loss = "categorical_crossentropy",
+  metrics = c("accuracy")
+)
+
+history <- model %>% fit(
+  features_train, Labels01.encoded,
+  epochs = 35,
+  batch_size = 512,
+  validation_split=0.3)
+
+
+
+
+
+
+
